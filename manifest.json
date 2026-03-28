@@ -1,0 +1,11 @@
+{
+  "domain": "et0_irrigation",
+  "name": "ET₀ Irrigation",
+  "version": "1.0.0",
+  "documentation": "https://github.com/you/et0_irrigation",
+  "dependencies": ["recorder"],
+  "codeowners": [],
+  "requirements": [],
+  "iot_class": "local_polling",
+  "config_flow": true
+}

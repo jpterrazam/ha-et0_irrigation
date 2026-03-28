@@ -1,0 +1,167 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Sensores meteorológicos",
+        "description": "Configure em pares Sensor + Unidade quando aplicável:\n1) Temperatura + unidade\n2) Velocidade do vento + unidade\n3) Pressão + unidade\nDepois selecione umidade, luminosidade e chuva.",
+        "data": {
+          "sensor_temperature": "Sensor de temperatura",
+          "temperature_unit": "Unidade da temperatura",
+          "sensor_humidity": "Sensor de umidade relativa",
+          "sensor_wind_speed": "Sensor de velocidade do vento",
+          "sensor_luminosity": "Sensor de luminosidade (lux)",
+          "sensor_pressure": "Sensor de pressão atmosférica",
+          "sensor_rain_today": "Sensor de chuva acumulada do dia",
+          "wind_speed_unit": "Unidade do vento",
+          "pressure_unit": "Unidade da pressão"
+        }
+      },
+      "general": {
+        "title": "Parâmetros gerais de irrigação",
+        "data": {
+          "irrigation_time": "Horário da irrigação",
+          "min_deficit": "Déficit mínimo para irrigar (mm)"
+        }
+      },
+      "zone_add": {
+        "title": "Adicionar zona de irrigação",
+        "description": "Zonas adicionadas: {zones_added} — {zone_list}",
+        "data": {
+          "switch": "Switch da válvula",
+          "type": "Tipo de controle",
+          "application_rate": "Taxa de aplicação (mm/min)",
+          "max_days_without_irrigation": "Máximo de dias sem irrigação permitido (0-5)",
+          "requires_companion": "Precisa de zona companheira durante toda a irrigação",
+          "companion_pool": "Zona companheira"
+        }
+      },
+      "zone_et0": {
+        "title": "Fator de ajuste de Evapotranspiração — {zone_name}",
+        "description": "1,0 = ET de referência. Use valores abaixo de 1,0 para menor demanda e acima de 1,0 para maior demanda (até 2,0).",
+        "data": {
+          "factor": "Fator de ajuste de Evapotranspiração (0,1 – 2,0)"
+        }
+      },
+      "zone_fixed": {
+        "title": "Tempo fixo de irrigação — {zone_name}",
+        "description": "Esta zona será irrigada por um tempo fixo independente do déficit.",
+        "data": {
+          "fixed_minutes": "Tempo de irrigação (minutos)",
+          "factor": "Fator de ajuste de Evapotranspiração (0,1 – 2,0)"
+        }
+      },
+      "zone_more": {
+        "title": "Mais zonas de irrigação?",
+        "description": "{zones_added} zona(s) de irrigação adicionada(s): {zone_list}",
+        "data": {
+          "add_more": "Adicionar mais uma zona de irrigação"
+        }
+      },
+      "block_add": {
+        "title": "Configurar grupo de irrigação",
+        "description": "Um grupo de irrigação define zonas de irrigação que ligam simultaneamente. Cada zona será desligada no seu próprio tempo.\n\nGrupos configurados: {blocks_added}\n{block_list}",
+        "data": {
+          "zones": "Zonas de irrigação neste grupo"
+        }
+      },
+      "block_more": {
+        "title": "Mais grupos de irrigação?",
+        "description": "{blocks_added} grupo(s) de irrigação configurado(s):\n{block_list}",
+        "data": {
+          "add_more": "Adicionar mais um grupo de irrigação"
+        }
+      }
+    },
+    "error": {
+      "entity_not_found": "Entidade não encontrada. Verifique se o sensor existe.",
+      "duplicate_zone_name": "Já existe uma zona com este nome.",
+      "duplicate_zone_switch": "Este switch já foi adicionado como zona.",
+      "invalid_companion_pool": "Companion pool inválido para zona dependente.",
+      "single_companion_only": "Selecione apenas uma zona companheira.",
+      "block_needs_zone": "O bloco precisa ter pelo menos uma zona."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Editar variáveis da integração",
+        "description": "Atualize os pares Sensor + Unidade (temperatura, vento e pressão) e os parâmetros gerais.\nAtive a opção abaixo para reconfigurar zonas e blocos mantendo os itens já cadastrados.",
+        "data": {
+          "sensor_temperature": "Sensor de temperatura",
+          "temperature_unit": "Unidade da temperatura",
+          "sensor_humidity": "Sensor de umidade relativa",
+          "sensor_wind_speed": "Sensor de velocidade do vento",
+          "sensor_luminosity": "Sensor de luminosidade (lux)",
+          "sensor_pressure": "Sensor de pressão atmosférica",
+          "sensor_rain_today": "Sensor de chuva acumulada do dia",
+          "wind_speed_unit": "Unidade do vento",
+          "pressure_unit": "Unidade da pressão",
+          "irrigation_time": "Horário da irrigação",
+          "min_deficit": "Déficit mínimo para irrigar (mm)",
+          "reconfigure_layout": "Reconfigurar zonas e blocos"
+        }
+      },
+      "zone_add": {
+        "title": "Adicionar zona de irrigação",
+        "description": "Zonas adicionadas: {zones_added} — {zone_list}",
+        "data": {
+          "switch": "Switch da válvula",
+          "type": "Tipo de controle",
+          "application_rate": "Taxa de aplicação (mm/min)",
+          "max_days_without_irrigation": "Máximo de dias sem irrigação permitido (0-5)",
+          "requires_companion": "Precisa de zona companheira durante toda a irrigação",
+          "companion_pool": "Zona companheira"
+        }
+      },
+      "zone_et0": {
+        "title": "Fator de ajuste de Evapotranspiração",
+        "data": {
+          "factor": "Fator de ajuste de Evapotranspiração (0,1 – 2,0)"
+        }
+      },
+      "zone_fixed": {
+        "title": "Tempo fixo de irrigação",
+        "data": {
+          "fixed_minutes": "Tempo de irrigação (minutos)",
+          "factor": "Fator de ajuste de Evapotranspiração (0,1 – 2,0)"
+        }
+      },
+      "zone_more": {
+        "title": "Mais zonas de irrigação?",
+        "description": "{zones_added} zona(s) de irrigação atualmente cadastrada(s).\nSelecione abaixo as zonas que deseja excluir.",
+        "data": {
+          "add_more": "Adicionar mais uma zona de irrigação",
+          "remove_zone_switch": "Zonas de irrigação",
+          "confirm_zone_deletion": "Confirmo a exclusão das zonas selecionadas"
+        }
+      },
+      "block_add": {
+        "title": "Configurar grupo de irrigação",
+        "description": "Um grupo de irrigação define zonas de irrigação que ligam simultaneamente.\n\nGrupos configurados: {blocks_added}\n{block_list}",
+        "data": {
+          "zones": "Zonas de irrigação neste grupo"
+        }
+      },
+      "block_more": {
+        "title": "Mais grupos de irrigação?",
+        "description": "{blocks_added} grupo(s) de irrigação atualmente configurado(s).\nSelecione abaixo os grupos que deseja excluir.",
+        "data": {
+          "add_more": "Adicionar mais um grupo de irrigação",
+          "remove_block": "Grupos de irrigação",
+          "confirm_block_deletion": "Confirmo a exclusão dos grupos selecionados"
+        }
+      }
+    },
+    "error": {
+      "invalid_json": "JSON inválido.",
+      "invalid_zones": "Formato de zonas inválido.",
+      "invalid_blocks": "Formato de blocos inválido.",
+      "invalid_companion_pool": "Companion pool inválido para zona dependente.",
+      "single_companion_only": "Selecione apenas uma zona companheira.",
+      "duplicate_zone_switch": "Este switch já foi adicionado como zona.",
+      "duplicate_zone_name": "Já existe uma zona com este nome.",
+      "entity_not_found": "Entidade não encontrada. Verifique se o sensor existe.",
+      "confirm_delete_required": "Marque a confirmação para excluir os itens selecionados."
+    }
+  }
+}
