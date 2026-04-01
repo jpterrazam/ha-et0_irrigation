@@ -20,7 +20,8 @@
         "title": "Parâmetros gerais de irrigação",
         "data": {
           "irrigation_time": "Horário da irrigação",
-          "min_deficit": "Déficit mínimo para irrigar (mm)"
+          "min_deficit": "Déficit mínimo para irrigar (mm)",
+          "altitude": "Altitude (m acima do nível do mar)"
         }
       },
       "zone_add": {
@@ -28,7 +29,6 @@
         "description": "Zonas adicionadas: {zones_added} — {zone_list}",
         "data": {
           "switch": "Switch da válvula",
-          "type": "Tipo de controle",
           "application_rate": "Taxa de aplicação (mm/min)",
           "max_days_without_irrigation": "Máximo de dias sem irrigação permitido (0-5)",
           "requires_companion": "Precisa de zona companheira durante toda a irrigação",
@@ -36,18 +36,12 @@
         }
       },
       "zone_et0": {
-        "title": "Fator de ajuste de Evapotranspiração — {zone_name}",
-        "description": "1,0 = ET de referência. Use valores abaixo de 1,0 para menor demanda e acima de 1,0 para maior demanda (até 2,0).",
+        "title": "Parâmetros ET₀ — {zone_name}",
+        "description": "1,0 = ET₀ de referência. Ajuste o fator conforme a demanda hídrica da zona.\nTempo mínimo: garante um mínimo de rega mesmo com déficit baixo (0 = sem mínimo).",
         "data": {
-          "factor": "Fator de ajuste de Evapotranspiração (0,1 – 2,0)"
-        }
-      },
-      "zone_fixed": {
-        "title": "Tempo fixo de irrigação — {zone_name}",
-        "description": "Esta zona será irrigada por um tempo fixo independente do déficit.",
-        "data": {
-          "fixed_minutes": "Tempo de irrigação (minutos)",
-          "factor": "Fator de ajuste de Evapotranspiração (0,1 – 2,0)"
+          "factor": "Fator de ajuste ET₀ (0,1 – 2,0)",
+          "min_minutes": "Tempo mínimo de rega (min, 0 = sem mínimo)",
+          "max_minutes": "Tempo máximo de rega (min)"
         }
       },
       "zone_more": {
@@ -77,6 +71,8 @@
       "duplicate_zone_name": "Já existe uma zona com este nome.",
       "duplicate_zone_switch": "Este switch já foi adicionado como zona.",
       "invalid_companion_pool": "Companion pool inválido para zona dependente.",
+      "companion_must_be_in_same_block": "A zona companheira deve estar no mesmo grupo de irrigação.",
+      "companion_chain_not_allowed": "Companheira em cadeia não é permitida (A->B e B->C).",
       "single_companion_only": "Selecione apenas uma zona companheira.",
       "block_needs_zone": "O bloco precisa ter pelo menos uma zona."
     }
@@ -91,7 +87,8 @@
           "temperature_unit": "Unidade da temperatura",
           "sensor_humidity": "Sensor de umidade relativa",
           "sensor_wind_speed": "Sensor de velocidade do vento",
-          "sensor_luminosity": "Sensor de luminosidade (lux)",
+          "pressure_unit": "Unidade da pressão",
+          "altitude": "Altitude (m acima do nível do mar)",
           "sensor_pressure": "Sensor de pressão atmosférica",
           "sensor_rain_today": "Sensor de chuva acumulada do dia",
           "wind_speed_unit": "Unidade do vento",
@@ -106,7 +103,6 @@
         "description": "Zonas adicionadas: {zones_added} — {zone_list}",
         "data": {
           "switch": "Switch da válvula",
-          "type": "Tipo de controle",
           "application_rate": "Taxa de aplicação (mm/min)",
           "max_days_without_irrigation": "Máximo de dias sem irrigação permitido (0-5)",
           "requires_companion": "Precisa de zona companheira durante toda a irrigação",
@@ -114,17 +110,13 @@
         }
       },
       "zone_et0": {
-        "title": "Fator de ajuste de Evapotranspiração",
+        "title": "Parâmetros ET₀ — {zone_name}",
         "data": {
-          "factor": "Fator de ajuste de Evapotranspiração (0,1 – 2,0)"
-        }
-      },
-      "zone_fixed": {
-        "title": "Tempo fixo de irrigação",
-        "data": {
-          "fixed_minutes": "Tempo de irrigação (minutos)",
-          "factor": "Fator de ajuste de Evapotranspiração (0,1 – 2,0)"
-        }
+          "factor": "Fator de ajuste ET₀ (0,1 – 2,0)",
+          "min_minutes": "Tempo mínimo de rega (min, 0 = sem mínimo)",
+          "max_minutes": "Tempo máximo de rega (min)"
+        },
+        "description": "1,0 = ET₀ de referência. Ajuste o fator conforme a demanda hídrica da zona.\nTempo mínimo: garante um mínimo de rega mesmo com déficit baixo (0 = sem mínimo)."
       },
       "zone_more": {
         "title": "Mais zonas de irrigação?",
@@ -157,6 +149,8 @@
       "invalid_zones": "Formato de zonas inválido.",
       "invalid_blocks": "Formato de blocos inválido.",
       "invalid_companion_pool": "Companion pool inválido para zona dependente.",
+      "companion_must_be_in_same_block": "A zona companheira deve estar no mesmo grupo de irrigação.",
+      "companion_chain_not_allowed": "Companheira em cadeia não é permitida (A->B e B->C).",
       "single_companion_only": "Selecione apenas uma zona companheira.",
       "duplicate_zone_switch": "Este switch já foi adicionado como zona.",
       "duplicate_zone_name": "Já existe uma zona com este nome.",

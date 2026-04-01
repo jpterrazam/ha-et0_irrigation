@@ -20,7 +20,8 @@
         "title": "General irrigation parameters",
         "data": {
           "irrigation_time": "Irrigation time",
-          "min_deficit": "Minimum deficit to irrigate (mm)"
+          "min_deficit": "Minimum deficit to irrigate (mm)",
+          "altitude": "Altitude (m above sea level)"
         }
       },
       "zone_add": {
@@ -28,7 +29,6 @@
         "description": "Added zones: {zones_added} — {zone_list}",
         "data": {
           "switch": "Valve switch",
-          "type": "Control type",
           "application_rate": "Application rate (mm/min)",
           "max_days_without_irrigation": "Maximum allowed days without irrigation (0-5)",
           "requires_companion": "Requires companion zone for full duration",
@@ -36,18 +36,12 @@
         }
       },
       "zone_et0": {
-        "title": "Evapotranspiration adjustment factor — {zone_name}",
-        "description": "1.0 = baseline ET. Use values below 1.0 for lower demand and above 1.0 for higher demand (up to 2.0).",
+        "title": "ET₀ parameters — {zone_name}",
+        "description": "1.0 = reference ET₀. Adjust the factor to match the zone's water demand.\nMinimum time: ensures a minimum irrigation run even when the deficit is low (0 = no minimum).",
         "data": {
-          "factor": "Evapotranspiration adjustment factor (0.1 – 2.0)"
-        }
-      },
-      "zone_fixed": {
-        "title": "Fixed irrigation time — {zone_name}",
-        "description": "This zone will be irrigated for a fixed time regardless of deficit.",
-        "data": {
-          "fixed_minutes": "Irrigation time (minutes)",
-          "factor": "Evapotranspiration adjustment factor (0.1 – 2.0)"
+          "factor": "ET₀ adjustment factor (0.1 – 2.0)",
+          "min_minutes": "Minimum irrigation time (min, 0 = no minimum)",
+          "max_minutes": "Maximum irrigation time (min)"
         }
       },
       "zone_more": {
@@ -77,6 +71,8 @@
       "duplicate_zone_name": "A zone with this name already exists.",
       "duplicate_zone_switch": "This switch is already added as a zone.",
       "invalid_companion_pool": "Invalid companion pool for dependent zone.",
+      "companion_must_be_in_same_block": "Companion zone must be in the same irrigation group.",
+      "companion_chain_not_allowed": "Companion chain is not allowed (A->B and B->C).",
       "single_companion_only": "Select only one companion zone.",
       "block_needs_zone": "A block must contain at least one zone."
     }
@@ -91,7 +87,8 @@
           "temperature_unit": "Temperature unit",
           "sensor_humidity": "Relative humidity sensor",
           "sensor_wind_speed": "Wind speed sensor",
-          "sensor_luminosity": "Luminosity sensor (lux)",
+          "pressure_unit": "Pressure unit",
+          "altitude": "Altitude (m above sea level)",
           "sensor_pressure": "Atmospheric pressure sensor",
           "sensor_rain_today": "Daily accumulated rain sensor",
           "wind_speed_unit": "Wind unit",
@@ -106,7 +103,6 @@
         "description": "Added zones: {zones_added} — {zone_list}",
         "data": {
           "switch": "Valve switch",
-          "type": "Control type",
           "application_rate": "Application rate (mm/min)",
           "max_days_without_irrigation": "Maximum allowed days without irrigation (0-5)",
           "requires_companion": "Requires companion zone for full duration",
@@ -114,17 +110,13 @@
         }
       },
       "zone_et0": {
-        "title": "Evapotranspiration adjustment factor",
+        "title": "ET₀ parameters — {zone_name}",
         "data": {
-          "factor": "Evapotranspiration adjustment factor (0.1 – 2.0)"
-        }
-      },
-      "zone_fixed": {
-        "title": "Fixed irrigation time",
-        "data": {
-          "fixed_minutes": "Irrigation time (minutes)",
-          "factor": "Evapotranspiration adjustment factor (0.1 – 2.0)"
-        }
+          "factor": "ET₀ adjustment factor (0.1 – 2.0)",
+          "min_minutes": "Minimum irrigation time (min, 0 = no minimum)",
+          "max_minutes": "Maximum irrigation time (min)"
+        },
+        "description": "1.0 = reference ET₀. Adjust the factor to match the zone's water demand.\nMinimum time: ensures a minimum irrigation run even when the deficit is low (0 = no minimum)."
       },
       "zone_more": {
         "title": "More irrigation zones?",
@@ -157,6 +149,8 @@
       "invalid_zones": "Invalid zones format.",
       "invalid_blocks": "Invalid blocks format.",
       "invalid_companion_pool": "Invalid companion pool for dependent zone.",
+      "companion_must_be_in_same_block": "Companion zone must be in the same irrigation group.",
+      "companion_chain_not_allowed": "Companion chain is not allowed (A->B and B->C).",
       "single_companion_only": "Select only one companion zone.",
       "duplicate_zone_switch": "This switch is already added as a zone.",
       "duplicate_zone_name": "A zone with this name already exists.",

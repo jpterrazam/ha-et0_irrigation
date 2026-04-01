@@ -10,6 +10,7 @@ from homeassistant import config_entries
 from homeassistant.helpers import selector
 
 from .const import (
+    CONF_ALTITUDE,
     CONF_BLOCKS,
     CONF_BLOCK_ZONES,
     CONF_IRRIGATION_TIME,
@@ -24,7 +25,8 @@ from .const import (
     CONF_SENSOR_WIND_SPEED,
     CONF_WIND_SPEED_UNIT,
     CONF_ZONE_FACTOR,
-    CONF_ZONE_FIXED_MINUTES,
+    CONF_ZONE_MAX_MINUTES,
+    CONF_ZONE_MIN_MINUTES,
     CONF_ZONE_MAX_DAYS_WITHOUT_IRRIGATION,
     CONF_ZONE_COMPANION_POOL,
     CONF_ZONE_APPLICATION_RATE,
@@ -39,7 +41,42 @@ from .const import (
 )
 
 ZONE_TYPE_ET0 = "et0"
-ZONE_TYPE_FIXED = "fixed"
+
+
+def _validate_companion_constraints(zones: list[dict], blocks: list[dict]) -> str | None:
+    """Validate companion restrictions shared by config/options flows."""
+    zone_map = {z[CONF_ZONE_NAME]: z for z in zones}
+
+    block_by_zone: dict[str, int] = {}
+    for block_idx, block in enumerate(blocks):
+        for zone_name in block.get(CONF_BLOCK_ZONES, []):
+            block_by_zone[zone_name] = block_idx
+
+    for zone in zones:
+        zone_name = zone[CONF_ZONE_NAME]
+        if not zone.get(CONF_ZONE_REQUIRES_COMPANION, False):
+            continue
+
+        companion_pool = zone.get(CONF_ZONE_COMPANION_POOL, []) or []
+        if not companion_pool:
+            return "invalid_companion_pool"
+
+        companion_name = companion_pool[0]
+        companion_zone = zone_map.get(companion_name)
+        if companion_zone is None:
+            return "invalid_companion_pool"
+
+        if companion_zone.get(CONF_ZONE_REQUIRES_COMPANION, False):
+            return "companion_chain_not_allowed"
+
+        dependent_block = block_by_zone.get(zone_name)
+        companion_block = block_by_zone.get(companion_name)
+        if dependent_block is None or companion_block is None:
+            return "companion_must_be_in_same_block"
+        if dependent_block != companion_block:
+            return "companion_must_be_in_same_block"
+
+    return None
 
 
 class ET0IrrigationConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -137,12 +174,23 @@ class ET0IrrigationConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self._data.update(user_input)
             return await self.async_step_zone_add()
 
+        default_altitude = float(self.hass.config.elevation or 0.0)
+
         schema = vol.Schema(
             {
                 vol.Required(CONF_IRRIGATION_TIME, default="02:00"): selector.TimeSelector(),
                 vol.Required(CONF_MIN_DEFICIT, default=2.0): selector.NumberSelector(
                     selector.NumberSelectorConfig(
                         min=0.0, max=20.0, step=0.5, unit_of_measurement="mm", mode="slider"
+                    )
+                ),
+                vol.Required(CONF_ALTITUDE, default=default_altitude): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=-500.0,
+                        max=9000.0,
+                        step=0.1,
+                        unit_of_measurement="m",
+                        mode="box",
                     )
                 ),
             }
@@ -206,20 +254,18 @@ class ET0IrrigationConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     CONF_ZONE_CREATED_AT: datetime.utcnow().isoformat(),
                     CONF_ZONE_SWITCH: zone_switch,
                     "switch_friendly_name": switch_friendly_name,
-                    CONF_ZONE_TYPE: user_input[CONF_ZONE_TYPE],
+                    CONF_ZONE_TYPE: ZONE_TYPE_ET0,
                     CONF_ZONE_APPLICATION_RATE: float(
                         user_input.get(CONF_ZONE_APPLICATION_RATE, DEFAULT_APPLICATION_RATE)
                     ),
+                    CONF_ZONE_MAX_MINUTES: 30,
                     CONF_ZONE_MAX_DAYS_WITHOUT_IRRIGATION: int(
                         user_input.get(CONF_ZONE_MAX_DAYS_WITHOUT_IRRIGATION, 0)
                     ),
                     CONF_ZONE_REQUIRES_COMPANION: requires_companion,
                     CONF_ZONE_COMPANION_POOL: companion_pool,
                 }
-                if user_input[CONF_ZONE_TYPE] == ZONE_TYPE_ET0:
-                    return await self.async_step_zone_et0()
-                else:
-                    return await self.async_step_zone_fixed()
+                return await self.async_step_zone_et0()
 
         existing_switches = [z[CONF_ZONE_SWITCH] for z in self._zones]
         companion_options = [
@@ -231,15 +277,6 @@ class ET0IrrigationConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             {
                 vol.Required(CONF_ZONE_SWITCH): selector.EntitySelector(
                     selector.EntitySelectorConfig(domain="switch")
-                ),
-                vol.Required(CONF_ZONE_TYPE, default=ZONE_TYPE_ET0): selector.SelectSelector(
-                    selector.SelectSelectorConfig(
-                        options=[
-                            {"value": ZONE_TYPE_ET0, "label": "ET₀ dinâmico"},
-                            {"value": ZONE_TYPE_FIXED, "label": "Tempo fixo"},
-                        ],
-                        mode="list",
-                    )
                 ),
                 vol.Required(
                     CONF_ZONE_APPLICATION_RATE,
@@ -295,6 +332,8 @@ class ET0IrrigationConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_zone_et0(self, user_input=None):
         if user_input is not None:
             self._current_zone[CONF_ZONE_FACTOR] = float(user_input[CONF_ZONE_FACTOR])
+            self._current_zone[CONF_ZONE_MIN_MINUTES] = int(user_input.get(CONF_ZONE_MIN_MINUTES) or 0)
+            self._current_zone[CONF_ZONE_MAX_MINUTES] = int(user_input.get(CONF_ZONE_MAX_MINUTES) or 30)
             self._zones.append(self._current_zone)
             self._current_zone = {}
             return await self.async_step_zone_more()
@@ -304,6 +343,16 @@ class ET0IrrigationConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 vol.Required(CONF_ZONE_FACTOR, default=1.0): selector.NumberSelector(
                     selector.NumberSelectorConfig(
                         min=0.1, max=2.0, step=0.05, mode="slider"
+                    )
+                ),
+                vol.Optional(CONF_ZONE_MIN_MINUTES, default=0): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=0, max=120, step=1, unit_of_measurement="min", mode="box"
+                    )
+                ),
+                vol.Required(CONF_ZONE_MAX_MINUTES, default=30): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=1, max=240, step=1, unit_of_measurement="min", mode="box"
                     )
                 ),
             }
@@ -311,41 +360,6 @@ class ET0IrrigationConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         return self.async_show_form(
             step_id="zone_et0",
-            data_schema=schema,
-            description_placeholders={
-                "zone_name": self._zone_friendly_name(self._current_zone[CONF_ZONE_SWITCH])
-            },
-        )
-
-    # ------------------------------------------------------------------
-    # Step 3c — Fixed zone parameters (time in minutes)
-    # ------------------------------------------------------------------
-
-    async def async_step_zone_fixed(self, user_input=None):
-        if user_input is not None:
-            self._current_zone[CONF_ZONE_FIXED_MINUTES] = int(user_input[CONF_ZONE_FIXED_MINUTES])
-            self._current_zone[CONF_ZONE_FACTOR] = float(user_input[CONF_ZONE_FACTOR])
-            self._zones.append(self._current_zone)
-            self._current_zone = {}
-            return await self.async_step_zone_more()
-
-        schema = vol.Schema(
-            {
-                vol.Required(CONF_ZONE_FIXED_MINUTES, default=10): selector.NumberSelector(
-                    selector.NumberSelectorConfig(
-                        min=1, max=120, step=1, unit_of_measurement="min", mode="slider"
-                    )
-                ),
-                vol.Required(CONF_ZONE_FACTOR, default=1.0): selector.NumberSelector(
-                    selector.NumberSelectorConfig(
-                        min=0.1, max=2.0, step=0.05, mode="slider"
-                    )
-                ),
-            }
-        )
-
-        return self.async_show_form(
-            step_id="zone_fixed",
             data_schema=schema,
             description_placeholders={
                 "zone_name": self._zone_friendly_name(self._current_zone[CONF_ZONE_SWITCH])
@@ -444,11 +458,16 @@ class ET0IrrigationConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     # ------------------------------------------------------------------
 
     async def async_step_block_more(self, user_input=None):
+        errors = {}
         if user_input is not None:
             if user_input.get("add_more"):
                 return await self.async_step_block_add()
             else:
-                return self._create_entry()
+                validation_error = _validate_companion_constraints(self._zones, self._blocks)
+                if validation_error:
+                    errors["base"] = validation_error
+                else:
+                    return self._create_entry()
 
         schema = vol.Schema(
             {
@@ -459,6 +478,7 @@ class ET0IrrigationConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="block_more",
             data_schema=schema,
+            errors=errors,
             description_placeholders={
                 "blocks_added": str(len(self._blocks)),
                 "block_list": " → ".join(
@@ -553,17 +573,26 @@ class ET0IrrigationOptionsFlow(config_entries.OptionsFlow):
                 return "invalid_zones"
             zone[CONF_ZONE_FACTOR] = factor
 
-            if ztype == ZONE_TYPE_FIXED:
-                try:
-                    fixed_minutes = int(zone.get(CONF_ZONE_FIXED_MINUTES))
-                except (TypeError, ValueError):
-                    return "invalid_zones"
-                if fixed_minutes < 1:
-                    return "invalid_zones"
-            elif ztype == ZONE_TYPE_ET0:
-                pass
-            else:
+            # All zones are ET0-based; normalise min_minutes (0 = no minimum)
+            try:
+                min_minutes = max(0, int(zone.get(CONF_ZONE_MIN_MINUTES, 0) or 0))
+            except (TypeError, ValueError):
+                min_minutes = 0
+            zone[CONF_ZONE_MIN_MINUTES] = min_minutes
+
+            try:
+                max_minutes = int(zone.get(CONF_ZONE_MAX_MINUTES, 30) or 30)
+            except (TypeError, ValueError):
                 return "invalid_zones"
+            if max_minutes < 1 or max_minutes > 240:
+                return "invalid_zones"
+            if max_minutes < min_minutes:
+                max_minutes = min_minutes
+            zone[CONF_ZONE_MAX_MINUTES] = max_minutes
+
+            if ztype != ZONE_TYPE_ET0:
+                return "invalid_zones"
+            zone[CONF_ZONE_TYPE] = ZONE_TYPE_ET0
 
             requires_companion = bool(zone.get(CONF_ZONE_REQUIRES_COMPANION, False))
             companion_pool = zone.get(CONF_ZONE_COMPANION_POOL, [])
@@ -624,6 +653,10 @@ class ET0IrrigationOptionsFlow(config_entries.OptionsFlow):
             if zname in companion_pool:
                 return "invalid_companion_pool"
 
+        companion_error = _validate_companion_constraints(zones, blocks)
+        if companion_error:
+            return companion_error
+
         return None
 
     async def async_step_init(self, user_input=None):
@@ -646,6 +679,7 @@ class ET0IrrigationOptionsFlow(config_entries.OptionsFlow):
                     errors[key] = "entity_not_found"
 
             if not errors:
+                default_altitude = float(self.hass.config.elevation or 0.0)
                 self._working_data = {
                     CONF_SENSOR_TEMPERATURE: user_input[CONF_SENSOR_TEMPERATURE],
                     CONF_TEMPERATURE_UNIT: user_input[CONF_TEMPERATURE_UNIT],
@@ -658,10 +692,13 @@ class ET0IrrigationOptionsFlow(config_entries.OptionsFlow):
                     CONF_PRESSURE_UNIT: user_input[CONF_PRESSURE_UNIT],
                     CONF_IRRIGATION_TIME: user_input[CONF_IRRIGATION_TIME],
                     CONF_MIN_DEFICIT: user_input[CONF_MIN_DEFICIT],
+                    CONF_ALTITUDE: user_input.get(CONF_ALTITUDE, default_altitude),
                 }
                 if user_input.get("reconfigure_layout"):
                     return await self.async_step_zone_more()
                 return self._create_options_entry(self._zones, self._blocks)
+
+        default_altitude = float(current.get(CONF_ALTITUDE, self.hass.config.elevation or 0.0) or 0.0)
 
         schema = vol.Schema(
             {
@@ -719,6 +756,15 @@ class ET0IrrigationOptionsFlow(config_entries.OptionsFlow):
                         min=0.0, max=20.0, step=0.5, unit_of_measurement="mm", mode="slider"
                     )
                 ),
+                vol.Required(CONF_ALTITUDE, default=default_altitude): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=-500.0,
+                        max=9000.0,
+                        step=0.1,
+                        unit_of_measurement="m",
+                        mode="box",
+                    )
+                ),
                 vol.Required("reconfigure_layout", default=False): selector.BooleanSelector(),
             }
         )
@@ -767,19 +813,18 @@ class ET0IrrigationOptionsFlow(config_entries.OptionsFlow):
                     CONF_ZONE_CREATED_AT: datetime.utcnow().isoformat(),
                     CONF_ZONE_SWITCH: zone_switch,
                     "switch_friendly_name": switch_friendly_name,
-                    CONF_ZONE_TYPE: user_input[CONF_ZONE_TYPE],
+                    CONF_ZONE_TYPE: ZONE_TYPE_ET0,
                     CONF_ZONE_APPLICATION_RATE: float(
                         user_input.get(CONF_ZONE_APPLICATION_RATE, DEFAULT_APPLICATION_RATE)
                     ),
+                    CONF_ZONE_MAX_MINUTES: 30,
                     CONF_ZONE_MAX_DAYS_WITHOUT_IRRIGATION: int(
                         user_input.get(CONF_ZONE_MAX_DAYS_WITHOUT_IRRIGATION, 0)
                     ),
                     CONF_ZONE_REQUIRES_COMPANION: requires_companion,
                     CONF_ZONE_COMPANION_POOL: companion_pool,
                 }
-                if user_input[CONF_ZONE_TYPE] == ZONE_TYPE_ET0:
-                    return await self.async_step_zone_et0()
-                return await self.async_step_zone_fixed()
+                return await self.async_step_zone_et0()
 
         existing_switches = [z[CONF_ZONE_SWITCH] for z in self._zones]
         companion_options = [
@@ -790,15 +835,6 @@ class ET0IrrigationOptionsFlow(config_entries.OptionsFlow):
             {
                 vol.Required(CONF_ZONE_SWITCH): selector.EntitySelector(
                     selector.EntitySelectorConfig(domain="switch")
-                ),
-                vol.Required(CONF_ZONE_TYPE, default=ZONE_TYPE_ET0): selector.SelectSelector(
-                    selector.SelectSelectorConfig(
-                        options=[
-                            {"value": ZONE_TYPE_ET0, "label": "ET₀ dinâmico"},
-                            {"value": ZONE_TYPE_FIXED, "label": "Tempo fixo"},
-                        ],
-                        mode="list",
-                    )
                 ),
                 vol.Required(
                     CONF_ZONE_APPLICATION_RATE,
@@ -846,38 +882,29 @@ class ET0IrrigationOptionsFlow(config_entries.OptionsFlow):
     async def async_step_zone_et0(self, user_input=None):
         if user_input is not None:
             self._current_zone[CONF_ZONE_FACTOR] = float(user_input[CONF_ZONE_FACTOR])
+            self._current_zone[CONF_ZONE_MIN_MINUTES] = int(user_input.get(CONF_ZONE_MIN_MINUTES) or 0)
+            self._current_zone[CONF_ZONE_MAX_MINUTES] = int(user_input.get(CONF_ZONE_MAX_MINUTES) or 30)
             self._zones.append(self._current_zone)
             self._current_zone = {}
             return await self.async_step_zone_more()
 
+        existing_min = int(self._current_zone.get(CONF_ZONE_MIN_MINUTES) or 0)
+        existing_max = int(self._current_zone.get(CONF_ZONE_MAX_MINUTES) or 30)
+        existing_factor = float(self._current_zone.get(CONF_ZONE_FACTOR, 1.0))
         schema = vol.Schema(
             {
-                vol.Required(CONF_ZONE_FACTOR, default=1.0): selector.NumberSelector(
+                vol.Required(CONF_ZONE_FACTOR, default=existing_factor): selector.NumberSelector(
                     selector.NumberSelectorConfig(min=0.1, max=2.0, step=0.05, mode="slider")
-                )
+                ),
+                vol.Optional(CONF_ZONE_MIN_MINUTES, default=existing_min): selector.NumberSelector(
+                    selector.NumberSelectorConfig(min=0, max=120, step=1, unit_of_measurement="min", mode="box")
+                ),
+                vol.Required(CONF_ZONE_MAX_MINUTES, default=existing_max): selector.NumberSelector(
+                    selector.NumberSelectorConfig(min=1, max=240, step=1, unit_of_measurement="min", mode="box")
+                ),
             }
         )
         return self.async_show_form(step_id="zone_et0", data_schema=schema)
-
-    async def async_step_zone_fixed(self, user_input=None):
-        if user_input is not None:
-            self._current_zone[CONF_ZONE_FIXED_MINUTES] = int(user_input[CONF_ZONE_FIXED_MINUTES])
-            self._current_zone[CONF_ZONE_FACTOR] = float(user_input[CONF_ZONE_FACTOR])
-            self._zones.append(self._current_zone)
-            self._current_zone = {}
-            return await self.async_step_zone_more()
-
-        schema = vol.Schema(
-            {
-                vol.Required(CONF_ZONE_FIXED_MINUTES, default=10): selector.NumberSelector(
-                    selector.NumberSelectorConfig(min=1, max=120, step=1, unit_of_measurement="min", mode="slider")
-                ),
-                vol.Required(CONF_ZONE_FACTOR, default=1.0): selector.NumberSelector(
-                    selector.NumberSelectorConfig(min=0.1, max=2.0, step=0.05, mode="slider")
-                ),
-            }
-        )
-        return self.async_show_form(step_id="zone_fixed", data_schema=schema)
 
     async def async_step_zone_more(self, user_input=None):
         errors = {}

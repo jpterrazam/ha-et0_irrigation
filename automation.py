@@ -12,6 +12,7 @@ import yaml
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
 
 from .const import (
     CONF_BLOCKS,
@@ -20,8 +21,8 @@ from .const import (
     CONF_MIN_DEFICIT,
     CONF_ZONE_COMPANION_POOL,
     CONF_ZONE_APPLICATION_RATE,
-    CONF_ZONE_FACTOR,
-    CONF_ZONE_FIXED_MINUTES,
+    CONF_ZONE_MAX_MINUTES,
+    CONF_ZONE_MIN_MINUTES,
     CONF_ZONE_MAX_DAYS_WITHOUT_IRRIGATION,
     CONF_ZONE_NAME,
     CONF_ZONE_REQUIRES_COMPANION,
@@ -31,11 +32,46 @@ from .const import (
     DEFAULT_APPLICATION_RATE,
     DOMAIN,
 )
+from .irrigation_rules import (
+    DEFAULT_ZONE_MAX_MINUTES,
+    build_zone_duration_template,
+    max_duration_template,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
 ZONE_TYPE_ET0 = "et0"
-ZONE_TYPE_FIXED = "fixed"
+_MANAGED_AUTOMATION_ALIAS = "ET₀ Irrigation — Irrigação automática"
+_MANAGED_AUTOMATION_DESC_MARKER = "Gerado automaticamente pelo componente ET₀ Irrigation."
+_MANAGED_AUTOMATION_ENTITY_ID_PREFIX = "automation.et0_irrigation_irrigacao_automatica"
+
+
+def _normalize_text(value: Any) -> str:
+    """Normalize text for robust legacy matching (accents/dashes/case)."""
+    if not isinstance(value, str):
+        return ""
+    normalized = (
+        unicodedata.normalize("NFKD", value)
+        .encode("ascii", "ignore")
+        .decode("ascii")
+        .lower()
+    )
+    return normalized
+
+
+def _looks_like_et0_managed_automation_text(*values: Any) -> bool:
+    """Return True for legacy/current ET0 managed automation identifiers."""
+    joined = " ".join(_normalize_text(v) for v in values if isinstance(v, str))
+    if not joined:
+        return False
+
+    # Current/legacy patterns seen in generated IDs, aliases and entity_ids.
+    patterns = (
+        "et0_irrigation",
+        "et0 irrigation",
+        "irrigacao automatica",
+    )
+    return all(p in joined for p in ("et0", "irrig")) or any(p in joined for p in patterns)
 
 
 def _managed_automation_id(entry: ConfigEntry) -> str:
@@ -101,48 +137,54 @@ def _zone_deficit_sensor(zone: dict) -> str:
 
 def _zone_time_template(zone: dict, min_deficit: float) -> str:
     """
-    Return a Jinja2 template string (in minutes) for the given zone's
+    Return a Jinja2 template string (in seconds) for the given zone's
     irrigation duration.
 
-    ET₀ zones:  deficit × factor / application_rate   (minimum 1 min)
-    Fixed zones: fixed_minutes              (constant)
+    All zones are ET0-based.
+
+    duration_sec = ceil(max(zone_deficit_mm / application_rate, min_minutes) * 60)
+
+    The et0_factor is NOT applied here — ZoneWaterDeficitSensor already
+    accumulates deficits multiplied by the factor, so the sensor value
+    already represents the zone-specific water depth to replenish.
     """
     zone_deficit_sensor = _zone_deficit_sensor(zone)
-    should_irrigate_expr = f"states('{zone_deficit_sensor}') | float(0) >= {min_deficit}"
 
-    if zone[CONF_ZONE_TYPE] == ZONE_TYPE_FIXED:
-        fixed_minutes = int(zone[CONF_ZONE_FIXED_MINUTES])
-        return f"{{{{ {fixed_minutes} if {should_irrigate_expr} else 0 }}}}"
-
-    factor = zone.get(CONF_ZONE_FACTOR, 1.0)
     try:
         application_rate = float(zone.get(CONF_ZONE_APPLICATION_RATE, DEFAULT_APPLICATION_RATE))
     except (TypeError, ValueError):
         application_rate = DEFAULT_APPLICATION_RATE
     if application_rate <= 0:
         application_rate = DEFAULT_APPLICATION_RATE
-    return (
-        f"{{{{ ([states('{zone_deficit_sensor}') | float(0) * {factor} / {application_rate}, 1] | max | round(1)) "
-        f"if {should_irrigate_expr} else 0 }}}}"
+
+    try:
+        min_minutes = max(0, int(zone.get(CONF_ZONE_MIN_MINUTES, 0) or 0))
+    except (TypeError, ValueError):
+        min_minutes = 0
+
+    try:
+        max_minutes = int(
+            zone.get(CONF_ZONE_MAX_MINUTES, DEFAULT_ZONE_MAX_MINUTES)
+            or DEFAULT_ZONE_MAX_MINUTES
+        )
+    except (TypeError, ValueError):
+        max_minutes = DEFAULT_ZONE_MAX_MINUTES
+
+    try:
+        max_days_without_irrigation = int(
+            zone.get(CONF_ZONE_MAX_DAYS_WITHOUT_IRRIGATION, 0) or 0
+        )
+    except (TypeError, ValueError):
+        max_days_without_irrigation = 0
+
+    return build_zone_duration_template(
+        deficit_sensor=zone_deficit_sensor,
+        min_deficit=min_deficit,
+        application_rate=application_rate,
+        min_minutes=min_minutes,
+        max_minutes=max_minutes,
+        max_days_without_irrigation=max_days_without_irrigation,
     )
-
-
-def _max_minutes_template(var_names: list[str]) -> str:
-    """Return a Jinja template with the maximum value of the given variables."""
-    if not var_names:
-        return "0"
-
-    joined = ", ".join(f"({name} | float(0))" for name in var_names)
-    return f"{{{{ [{joined}] | max }}}}"
-
-
-def _max_minutes_template_rounded(var_names: list[str]) -> str:
-    """Return a Jinja template with rounded max value from given variables."""
-    if not var_names:
-        return "0"
-
-    joined = ", ".join(f"({name} | float(0))" for name in var_names)
-    return f"{{{{ [{joined}] | max | round(1) }}}}"
 
 
 def _pick_companion(
@@ -205,6 +247,7 @@ def _build_automation(config: dict, automation_id: str) -> dict[str, Any]:
     # Simple companion strategy: raise companion duration to at least the
     # dependent zone duration, i.e. max(t_companion, t_dependent).
     companion_requirements: dict[str, list[str]] = {}
+    dependent_companion_var: dict[str, str] = {}
     for zone in zones:
         if not zone.get(CONF_ZONE_REQUIRES_COMPANION, False):
             continue
@@ -220,11 +263,12 @@ def _build_automation(config: dict, automation_id: str) -> dict[str, Any]:
 
         companion_name = companion_candidates[0]
         companion_var = zone_var_map[companion_name]
+        dependent_companion_var[dependent_name] = companion_var
         companion_requirements.setdefault(companion_var, [companion_var]).append(dependent_var)
 
     if companion_requirements:
         companion_overrides = {
-            cvar: _max_minutes_template_rounded(dep_vars)
+            cvar: max_duration_template(dep_vars)
             for cvar, dep_vars in companion_requirements.items()
         }
         actions.append({"variables": companion_overrides})
@@ -240,17 +284,26 @@ def _build_automation(config: dict, automation_id: str) -> dict[str, Any]:
                 switch = zone_map[zname][CONF_ZONE_SWITCH]
                 zlabel = zone_label_map[zname]
                 zvar = zone_var_map[zname]
+                condition_templates = [
+                    {
+                        "condition": "template",
+                        "value_template": f"{{{{ {zvar} | float(0) > 0 }}}}",
+                    }
+                ]
+                companion_var = dependent_companion_var.get(zname)
+                if companion_var:
+                    condition_templates.append(
+                        {
+                            "condition": "template",
+                            "value_template": f"{{{{ {companion_var} | float(0) > 0 }}}}",
+                        }
+                    )
                 actions.append(
                     {
                         "alias": f"Liga {zlabel} se houver necessidade",
                         "choose": [
                             {
-                                "conditions": [
-                                    {
-                                        "condition": "template",
-                                        "value_template": f"{{{{ {zvar} | float(0) > 0 }}}}",
-                                    }
-                                ],
+                                "conditions": condition_templates,
                                 "sequence": [
                                     {
                                         "action": "switch.turn_on",
@@ -298,7 +351,7 @@ def _build_automation(config: dict, automation_id: str) -> dict[str, Any]:
             for zname in ending_zone_names:
                 switch = zone_map[zname][CONF_ZONE_SWITCH]
                 zlabel = zone_label_map[zname]
-                off_delay = _max_minutes_template(off_requirements.get(zname, [zone_var_map[zname]]))
+                off_delay = max_duration_template(off_requirements.get(zname, [zone_var_map[zname]]))
                 parallel_sequences.append(
                     {
                         "sequence": [
@@ -314,7 +367,7 @@ def _build_automation(config: dict, automation_id: str) -> dict[str, Any]:
                                         "sequence": [
                                             {
                                                 "delay": {
-                                                    "minutes": off_delay
+                                                    "seconds": off_delay
                                                 },
                                                 "alias": f"Aguarda {zlabel} (bloco {block_idx + 1})",
                                             },
@@ -341,9 +394,9 @@ def _build_automation(config: dict, automation_id: str) -> dict[str, Any]:
         continuing_zones = [z for z in block_zone_names if last_block_of[z] != block_idx]
         if continuing_zones and ending_zone_names:
             ending_vars = [zone_var_map[z] for z in ending_zone_names]
-            block_wait = _max_minutes_template(ending_vars)
+            block_wait = max_duration_template(ending_vars)
             actions.append({
-                "delay": {"minutes": block_wait},
+                "delay": {"seconds": block_wait},
                 "alias": f"Aguarda fim do bloco {block_idx + 1} antes do próximo",
             })
 
@@ -362,7 +415,7 @@ def _build_automation(config: dict, automation_id: str) -> dict[str, Any]:
         "alias": "ET₀ Irrigation — Irrigação automática",
         "description": (
             f"Gerado automaticamente pelo componente ET₀ Irrigation. "
-            f"Déficit mínimo: {min_deficit}mm. Sensor: water_deficit_1d."
+            f"Déficit mínimo por zona: {min_deficit}mm."
         ),
         "triggers": [{"trigger": "time", "at": irrigation_time}],
         "actions": actions,
@@ -372,6 +425,93 @@ def _build_automation(config: dict, automation_id: str) -> dict[str, Any]:
 
 def _automations_yaml_path(hass: HomeAssistant) -> str:
     return hass.config.path("automations.yaml")
+
+
+def _is_managed_automation_record(item: Any) -> bool:
+    """Return True when an automation YAML record is managed by this integration."""
+    if not isinstance(item, dict):
+        return False
+    aid = item.get("id")
+    alias = item.get("alias")
+    desc = item.get("description")
+    if isinstance(aid, str) and aid.startswith("et0_irrigation_"):
+        return True
+    if alias == _MANAGED_AUTOMATION_ALIAS and isinstance(desc, str) and _MANAGED_AUTOMATION_DESC_MARKER in desc:
+        return True
+    if _looks_like_et0_managed_automation_text(aid, alias, desc):
+        return True
+    return False
+
+
+async def _async_cleanup_stale_automation_registry_entries(
+    hass: HomeAssistant,
+    keep_automation_id: str | None,
+) -> None:
+    """Remove stale automation entity-registry entries created by this integration."""
+    registry = er.async_get(hass)
+    for entry in list(registry.entities.values()):
+        if entry.domain != "automation":
+            continue
+
+        entry_entity_id = (entry.entity_id or "").lower()
+        entry_unique_id = entry.unique_id if isinstance(entry.unique_id, str) else ""
+        entry_name = entry.name if isinstance(entry.name, str) else ""
+        entry_original_name = (
+            entry.original_name if isinstance(entry.original_name, str) else ""
+        )
+
+        looks_managed = (
+            entry_unique_id.startswith("et0_irrigation_")
+            or entry_entity_id.startswith(_MANAGED_AUTOMATION_ENTITY_ID_PREFIX)
+            or entry_name == _MANAGED_AUTOMATION_ALIAS
+            or entry_original_name == _MANAGED_AUTOMATION_ALIAS
+            or _looks_like_et0_managed_automation_text(
+                entry_entity_id,
+                entry_unique_id,
+                entry_name,
+                entry_original_name,
+            )
+        )
+        if not looks_managed:
+            continue
+
+        # Keep exactly the current managed automation entity when possible.
+        if keep_automation_id and entry_unique_id == keep_automation_id:
+            continue
+
+        registry.async_remove(entry.entity_id)
+
+
+def _cleanup_stale_automation_states(
+    hass: HomeAssistant,
+    keep_automation_id: str | None,
+) -> None:
+    """Remove stale ET0 automation entities from HA runtime state machine."""
+    for state in list(hass.states.async_all("automation")):
+        entity_id = (state.entity_id or "").lower()
+        if not (
+            entity_id.startswith(_MANAGED_AUTOMATION_ENTITY_ID_PREFIX)
+            or _looks_like_et0_managed_automation_text(
+                entity_id,
+                state.name,
+                state.attributes.get("friendly_name"),
+                state.attributes.get("id"),
+            )
+        ):
+            continue
+
+        state_automation_id = state.attributes.get("id")
+        if keep_automation_id and state_automation_id == keep_automation_id:
+            continue
+
+        hass.states.async_remove(state.entity_id)
+
+
+async def async_cleanup_automation_ghosts(hass: HomeAssistant) -> None:
+    """Force cleanup of stale ET0 automation entities/registry entries."""
+    await _async_cleanup_stale_automation_registry_entries(hass, None)
+    _cleanup_stale_automation_states(hass, None)
+    await hass.services.async_call("automation", "reload", blocking=True)
 
 
 async def async_create_automation(hass: HomeAssistant, entry: ConfigEntry) -> None:
@@ -396,8 +536,8 @@ async def async_create_automation(hass: HomeAssistant, entry: ConfigEntry) -> No
             )
             return False
 
-        # Remove previous automation managed by this entry
-        existing = [a for a in existing if a.get("id") != automation_id]
+        # Keep only non-managed records, then write exactly one managed automation.
+        existing = [a for a in existing if not _is_managed_automation_record(a)]
 
         existing.append(automation)
 
@@ -414,13 +554,17 @@ async def async_create_automation(hass: HomeAssistant, entry: ConfigEntry) -> No
     # This must not bring down the integration if reload fails.
     try:
         await hass.services.async_call("automation", "reload", blocking=True)
+        await _async_cleanup_stale_automation_registry_entries(hass, automation_id)
+        _cleanup_stale_automation_states(hass, automation_id)
+        # Reload again after cleanup so HA keeps only one managed entity in selectors.
+        await hass.services.async_call("automation", "reload", blocking=True)
     except Exception:
         _LOGGER.exception("ET₀ Irrigation: failed to reload automations after write")
         return
 
     _LOGGER.info(
         "ET₀ Irrigation: automation written to automations.yaml (id=%s) at %s, "
-        "deficit sensors: water_deficit_1d..5d, min deficit: %smm",
+        "min deficit per zone: %smm",
         automation_id,
         config.get(CONF_IRRIGATION_TIME, "02:00"),
         config.get(CONF_MIN_DEFICIT, 2.0),
@@ -440,13 +584,15 @@ async def async_remove_automation(hass: HomeAssistant, entry: ConfigEntry) -> No
             existing = yaml.safe_load(f) or []
         if not isinstance(existing, list):
             return
-        existing = [a for a in existing if a.get("id") != automation_id]
+        existing = [a for a in existing if not _is_managed_automation_record(a)]
         with open(yaml_path, "w", encoding="utf-8") as f:
             yaml.dump(existing, f, allow_unicode=True, sort_keys=False, default_flow_style=False)
 
     await hass.async_add_executor_job(_remove)
     try:
         await hass.services.async_call("automation", "reload", blocking=True)
+        await _async_cleanup_stale_automation_registry_entries(hass, None)
+        _cleanup_stale_automation_states(hass, None)
     except Exception:
         _LOGGER.exception("ET₀ Irrigation: failed to reload automations after removal")
         return

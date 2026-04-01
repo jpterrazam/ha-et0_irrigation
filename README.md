@@ -1,7 +1,23 @@
 # ET0 Irrigation - Custom Component for Home Assistant
 
-Componente de irrigacao automatica baseado em ET0 (Penman-Monteith FAO-56),
-com controle por zonas, blocos simultaneos e deficit hidrico por zona.
+Componente de irrigacao automatica por ET0 (Penman-Monteith FAO-56), com controle por zonas, execucao por grupos e deficit hidrico acumulado por zona.
+
+## Visao geral
+
+Objetivo:
+- irrigar quando ha necessidade real de agua por zona;
+- considerar ET0, chuva e rega efetiva;
+- executar uma verificacao diaria no horario configurado.
+
+Pontos-chave da versao atual:
+- todas as zonas sao ET0 (modo fixed foi removido);
+- decisao de irrigacao e por zona;
+- nao existe bloqueio global por chuva do dia anterior;
+- suporte a tempo minimo e tempo maximo por zona;
+- forca de irrigacao por dias maximos sem rega;
+- sincronizacao de zonas companheiras.
+- latitude e obtida automaticamente pelo Home Assistant;
+- altitude e informada manualmente no config flow.
 
 ## O que o componente cria
 
@@ -10,7 +26,10 @@ com controle por zonas, blocos simultaneos e deficit hidrico por zona.
 | Entidade | Funcao |
 |---|---|
 | `sensor.et0_irrigation_et0_today` | ET0 acumulada do dia atual (mm) |
-| `sensor.et0_irrigation_deficit_1d` | Deficit ambiental do ultimo dia fechado (mm) |
+| Sensor Water Deficit Nd (unique_id `et0_irrigation_deficit_Nd`) | Deficit global diario de referencia (ET0 hoje - chuva hoje), com atributos de diagnostico |
+
+Observacao:
+- N depende da configuracao interna de dias do sensor de deficit (padrao 5 no fluxo atual).
 
 ### Entidades por zona
 
@@ -20,11 +39,11 @@ Para cada zona configurada:
 |---|---|
 | `sensor.et0_irrigation_zone_deficit_<slug_da_zona>` | Deficit acumulado da zona (mm) |
 
-### Botao de servico
+### Botao
 
 | Entidade | Funcao |
 |---|---|
-| `button.reset_zone_deficits` (nome exibido: Reset Zone Deficits) | Zera o deficit de todas as zonas |
+| Botao "Reset Zone Deficits" | Zera o deficit de todas as zonas |
 
 ## Instalacao
 
@@ -44,126 +63,127 @@ Para cada zona configurada:
 | Pressao atmosferica | hPa ou kPa |
 | Chuva acumulada do dia | mm |
 
-## Configuracao principal
+## Configuracao global
 
 | Campo | Descricao |
 |---|---|
 | Horario da irrigacao | Hora de disparo da automacao gerada |
-| Deficit minimo para irrigar | Limite usado por todas as zonas para decidir ligar |
+| Deficit minimo para irrigar | Limite global comparado com o deficit de cada zona |
+| Altitude do local (m) | Usada no calculo ET0 como apoio ao parametro atmosferico; pode ser ajustada manualmente no config flow |
 
 ## Configuracao por zona
 
-| Campo | Descricao |
-|---|---|
-| Tipo | `et0` (dinamico) ou `fixed` (tempo fixo) |
-| Switch | Valvula da zona |
-| Taxa de aplicacao (mm/min) | Conversao de tempo ligado para mm aplicados |
-| Fator de ajuste ET0 | Multiplica ET0 ambiental para adequar microclima da zona |
-| Maximo de dias sem irrigacao | Usado para dimensionar o limite inferior (floor) de superavit |
+| Campo | Faixa | Descricao |
+|---|---|---|
+| Switch | - | Valvula da zona |
+| Taxa de aplicacao (mm/min) | > 0 | Converte tempo ligado em mm aplicados |
+| Fator ET0 | 0.1 a 2.0 | Ajuste de exposicao da zona sobre a ET0 |
+| Tempo minimo (min) | 0 a 120 | Piso de tempo por acionamento |
+| Tempo maximo (min) | 1 a 240 | Teto por ciclo (com excecao para sincronizacao de companheira) |
+| Max. dias sem irrigacao | 0 a 5 | Forca irrigacao ao atingir o limite; 0 = nao pode ficar sem irrigacao |
+| Requer companheira | bool | Indica que a zona precisa operar junto de outra zona |
+| Pool de companheiras | lista | Zonas elegiveis para acompanhar a zona dependente |
+
+Validacoes de configuracao:
+- nao permite companheira em cadeia;
+- exige companheira no mesmo grupo;
+- valida limites de fator, tempos e dias.
 
 ## Como a automacao funciona
 
-O componente gera e atualiza automaticamente uma automacao em `automations.yaml`.
+O componente gera/atualiza automaticamente uma automacao em `automations.yaml`.
 
 Fluxo:
 1. Dispara no horario configurado.
-2. Calcula a duracao de cada zona.
-3. Liga zonas por bloco (simultaneas no bloco).
-4. Desliga cada zona no proprio tempo.
+2. Calcula duracao de cada zona em segundos.
+3. Processa um grupo por vez.
+4. Liga zonas elegiveis do grupo simultaneamente.
+5. Desliga cada zona no proprio tempo.
+6. Inicia o proximo grupo apenas quando o grupo atual termina.
 
-Regra de irrigacao por zona:
-- So irriga quando `zone_deficit >= deficit_minimo`.
+Regras de acionamento por zona:
+1. Tempo teorico: deficit_zona / taxa_aplicacao.
+2. Se deficit_zona < deficit_minimo, tempo = 0.
+3. Excecao: se dias_sem_irrigacao >= max_dias_sem_irrigacao, forca irrigacao.
+4. Tempo final aplica minimo e maximo configurados.
+5. Precisao de execucao em segundos.
 
-Duracao por tipo:
-- Zona `et0`: `tempo = max(deficit * fator / taxa_aplicacao, 1 minuto)`.
-- Zona `fixed`: tempo fixo configurado.
+## Zonas companheiras
+
+Quando uma zona depende de companheira:
+- ambas devem permanecer ligadas durante o tempo da zona dependente;
+- se necessario, o tempo da companheira e elevado para acompanhar;
+- se esse ajuste ultrapassar o tempo maximo da companheira, a ultrapassagem e permitida somente nesse caso.
 
 ## Modelo de deficit por zona
 
-A logica operacional segue:
+Formula conceitual:
 
-`deficit = deficit_anterior + (ET0_ambiente * fator) - chuva_efetiva - irrigacao_efetiva`
+`deficit_zona = deficit_anterior + ET0_ajustada_zona - chuva_global - irrigacao_efetiva_zona`
 
 Onde:
-- ET0_ambiente vem do baseline global do componente (preferencia pelo sensor 1d da integracao).
-- irrigacao_efetiva vem do evento OFF do switch da zona:
-  `mm_irrigados = minutos_ligado * taxa_aplicacao`.
+- ET0_ajustada_zona = ET0_global * fator_da_zona;
+- chuva_global e aplicada igualmente a todas as zonas;
+- irrigacao_efetiva_zona = minutos_valvula_aberta * taxa_aplicacao.
 
-## Limite inferior de superavit (floor dinamico)
+Comportamento:
+- deficit por zona nao reinicia na virada do dia;
+- pode ficar negativo (superavit);
+- ha piso dinamico de superavit para evitar acumulacao negativa excessiva.
 
-Para evitar carregar superavit muito negativo por muito tempo:
+## Chuva que conta como "rega efetiva"
 
-`deficit = max(deficit, limite_inferior)`
+No fechamento de um dia, para cada zona:
+- se chuva_dia >= ET0_ajustada_da_zona_dia, o dia conta como rega efetiva;
+- isso reinicia o contador de dias sem irrigacao da zona.
 
-Com:
+## Servicos
 
-`limite_inferior = -(ET0_medio_ambiente * fator_da_zona * max_dias_sem_irrigacao)`
+### set_zone_parameter
+Atualiza parametros de uma zona e recarrega a integracao.
 
-Detalhes importantes:
-- ET0 medio usa historico global de 7 dias (`et0_daily_history`).
-- Esse historico e alimentado com ET0 de dia fechado (na atualizacao do deficit 1d),
-  nao com os valores parciais intra-dia do ET0 Today.
-- Enquanto nao ha historico suficiente, usa fallback base de 5 mm.
+Campos suportados:
+- zone_switch (obrigatorio)
+- factor
+- min_minutes
+- max_minutes
+- application_rate
+- max_days_without_irrigation
 
-## Chuva que conta como "dia irrigado"
+### cleanup_automation_ghosts
+Remove registros antigos/duplicados de automacoes ET0 no runtime e no entity registry.
 
-Se em um dia fechado `chuva >= ET0` daquele dia, a zona marca esse dia como
-rega efetiva para efeito de atributos diagnosticos.
+## Dashboard
+
+O componente gera dashboard Lovelace automaticamente.
+
+Notas:
+- a geracao automatica segue ativa;
+- o layout sera aperfeicoado em versoes futuras.
 
 ## Reset manual dos deficits
 
-Ao pressionar o botao Reset Zone Deficits:
-- todas as zonas sao zeradas para `0.0 mm`;
-- `last_processed_day` vira ontem;
-- `last_effective_watering_day` vira hoje.
-
-## Comportamento em zona removida e re-incluida
-
-Cada zona recebe um marcador `created_at` no config flow.
-Quando a zona e re-incluida, o sensor detecta marcador novo e reinicia em zero,
-mesmo que exista estado antigo no recorder.
-
-## Principais atributos do sensor de zona
-
-Exemplo de atributos expostos em `sensor.et0_irrigation_zone_deficit_*`:
-
-```json
-{
-  "zone_switch": "switch.zona_1",
-  "zone_type": "et0",
-  "zone_created_at": "2026-03-27T15:30:00",
-  "et0_factor": 1.2,
-  "application_rate_mm_min": 0.55,
-  "min_surplus_floor_mm": -16.8,
-  "et0_history_days": 7,
-  "et0_average_basis": "historical",
-  "last_processed_day": "2026-03-26",
-  "last_effective_watering_day": "2026-03-26",
-  "days_without_irrigation": 1,
-  "environment_source": "water_deficit_1d_entity",
-  "last_irrigation_mm": 8.5
-}
-```
-
-## Formula ET0 (resumo)
-
-- Metodo: Penman-Monteith FAO-56.
-- Ra (radiacao extraterrestre): calculada dinamicamente por latitude e dia do ano.
-- Irradiacao: integracao trapezoidal de luminosidade (lux -> W/m2 -> Wh/m2).
-- G (fluxo de calor no solo): 0 no passo diario.
+Ao acionar o botao "Reset Zone Deficits":
+- todas as zonas voltam para `0.0 mm`;
+- `last_processed_day` e ajustado para ontem;
+- `last_effective_watering_day` e ajustado para hoje.
 
 ## Troubleshooting rapido
 
 Zona nao irriga:
-1. Verifique se `sensor.et0_irrigation_zone_deficit_* >= deficit_minimo`.
+1. Verifique se o deficit da zona atingiu o minimo global, ou se a forca por dias foi acionada.
 2. Verifique se a automacao gerada existe e esta habilitada.
 3. Verifique se o switch da zona responde a ON/OFF.
 
-Deficit de zona parado:
-1. Verifique se os sensores meteorologicos estao validos.
-2. Verifique `sensor.et0_irrigation_deficit_1d`.
-3. Veja o atributo `environment_source` da zona.
+Zona dependente nao liga:
+1. Verifique se ha companheira valida no mesmo grupo.
+2. Verifique configuracao de pool de companheiras.
 
-Reset geral:
-1. Pressione o botao Reset Zone Deficits.
-2. Confirme que todos os `zone_deficit` voltaram para 0.
+Deficit de zona parado:
+1. Verifique os sensores meteorologicos.
+2. Verifique a entidade de ET0 Today.
+3. Veja os atributos do sensor da zona (`environment_source`, `days_without_irrigation`, `last_irrigation_mm`).
+
+## Referencia de requisitos
+
+Para regras funcionais detalhadas e criterios de aceite, consulte `SPECIFICACAO_TECNICA_V2.md`.

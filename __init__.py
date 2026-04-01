@@ -8,6 +8,8 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
 from .automation import async_create_automation, async_remove_automation
+from .dashboard import async_create_dashboard, async_remove_dashboard
+from .services import async_setup_services, async_unload_services
 from .const import AUTOMATION_UNIQUE_ID_KEY
 
 _LOGGER = logging.getLogger(__name__)
@@ -41,6 +43,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             "ET₀ Irrigation: failed to create/reload automation; sensors will remain available"
         )
 
+    try:
+        await async_create_dashboard(hass, entry)
+    except Exception:
+        _LOGGER.exception(
+            "ET₀ Irrigation: failed to create dashboard; integration will remain functional"
+        )
+
+    # Register services (idempotent — safe to call on every entry setup)
+    await async_setup_services(hass)
+
     return True
 
 
@@ -50,8 +62,16 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     except Exception:
         _LOGGER.exception("ET₀ Irrigation: failed to remove/reload automation during unload")
 
+    try:
+        await async_remove_dashboard(hass, entry)
+    except Exception:
+        _LOGGER.exception("ET₀ Irrigation: failed to remove dashboard during unload")
+
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
         hass.data[DOMAIN].pop(entry.entry_id)
+
+    # Unload services only when no more entries remain
+    await async_unload_services(hass)
 
     return unload_ok

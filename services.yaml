@@ -1,0 +1,90 @@
+set_zone_parameter:
+  name: Configurar parâmetros da zona
+  description: >
+    Atualiza um ou mais parâmetros de uma zona de irrigação.
+    A integração é recarregada automaticamente após a alteração,
+    recalculando a automação e o dashboard.
+  fields:
+    zone_switch:
+      name: Switch da zona
+      description: Entity ID do switch da válvula da zona a configurar.
+      required: true
+      example: switch.jardim_frente_valvula_irrigacao
+      selector:
+        entity:
+          domain: switch
+    factor:
+      name: Fator ET₀
+      description: >
+        Multiplicador do déficit ambiental para esta zona.
+        1.0 = referência, < 1.0 = menor demanda hídrica, > 1.0 = maior demanda.
+      required: false
+      example: 1.0
+      selector:
+        number:
+          min: 0.1
+          max: 2.0
+          step: 0.05
+          mode: slider
+    min_minutes:
+      name: Tempo mínimo de rega (min)
+      description: >
+        Tempo mínimo de irrigação em minutos.
+        Se o ET₀ calcular menos que isso, usa este valor como piso.
+        0 = sem mínimo.
+      required: false
+      example: 5
+      selector:
+        number:
+          min: 0
+          max: 120
+          step: 1
+          unit_of_measurement: min
+          mode: box
+    max_minutes:
+      name: Tempo máximo de rega (min)
+      description: >
+        Tempo máximo de irrigação por ciclo para esta zona.
+        Exceção: em sincronização com zona companheira, pode ser ultrapassado.
+      required: false
+      example: 30
+      selector:
+        number:
+          min: 1
+          max: 240
+          step: 1
+          unit_of_measurement: min
+          mode: box
+    application_rate:
+      name: Taxa de aplicação (mm/min)
+      description: >
+        Volume de água aplicado por minuto de irrigação nesta zona.
+        Padrão Rain Bird XF-SDI 30×40 cm = 0.473 mm/min.
+      required: false
+      example: 0.473
+      selector:
+        number:
+          min: 0.01
+          max: 10.0
+          step: 0.001
+          unit_of_measurement: mm/min
+          mode: box
+    max_days_without_irrigation:
+      name: Máx. dias sem irrigação
+      description: >
+        Número máximo de dias sem irrigação antes de forçar uma rega.
+        0 = não pode ficar sem irrigação.
+      required: false
+      example: 3
+      selector:
+        number:
+          min: 0
+          max: 5
+          step: 1
+          mode: slider
+
+cleanup_automation_ghosts:
+  name: Limpar automações fantasma
+  description: >
+    Remove registros antigos/duplicados de automações ET₀ no runtime e no
+    entity registry, e recarrega automações para limpar os seletores.

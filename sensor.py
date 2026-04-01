@@ -21,11 +21,13 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
-from homeassistant.helpers.event import async_track_state_change_event, async_track_time_change
+from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.util import dt as dt_util
 
 from . import DOMAIN
 from .const import (
+    CONF_ALTITUDE,
+    CONF_SENSOR_RAIN_TODAY,
     CONF_ZONE_APPLICATION_RATE,
     CONF_ZONE_CREATED_AT,
     CONF_ZONE_FACTOR,
@@ -70,8 +72,11 @@ async def async_setup_entry(
         if isinstance(zone, dict) and zone.get(CONF_ZONE_SWITCH)
     ]
 
+    et0_today = ET0TodaySensor(hass, entry, config)
+    config["et0_today_entity"] = et0_today
+
     entities = [
-        ET0TodaySensor(hass, entry, config),
+        et0_today,
         water_deficit_1d,
         *zone_deficit_entities,
     ]
@@ -314,6 +319,23 @@ def _penman_monteith(
     return max(et0, 0.0)
 
 
+def _resolve_altitude_m(hass: HomeAssistant, config: dict) -> float:
+    """Return altitude in meters using integration config with HA fallback."""
+    altitude = config.get(CONF_ALTITUDE, hass.config.elevation)
+    try:
+        return float(0.0 if altitude is None else altitude)
+    except (TypeError, ValueError):
+        try:
+            return float(hass.config.elevation or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+
+def _pressure_from_altitude_kpa(altitude_m: float) -> float:
+    """Estimate atmospheric pressure from altitude (FAO-56 approximation)."""
+    return max(0.0, 101.3 * ((293.0 - 0.0065 * altitude_m) / 293.0) ** 5.26)
+
+
 # ---------------------------------------------------------------------------
 # ET₀ today sensor
 # ---------------------------------------------------------------------------
@@ -369,6 +391,7 @@ class ET0TodaySensor(SensorEntity, RestoreEntity):
             rh_state = self.hass.states.get(config["sensor_humidity"])
             wind_state = self.hass.states.get(config["sensor_wind_speed"])
             pressure_state = self.hass.states.get(config["sensor_pressure"])
+            altitude_m = _resolve_altitude_m(self.hass, config)
 
             t = _safe_float(t_state)
             rh = _safe_float(rh_state)
@@ -378,6 +401,7 @@ class ET0TodaySensor(SensorEntity, RestoreEntity):
             invalid_inputs = []
             invalid_details = []
             used_fallback = False
+            pressure_from_last_valid = False
 
             if t is None:
                 t = self._last_valid_inputs.get("temperature")
@@ -411,6 +435,7 @@ class ET0TodaySensor(SensorEntity, RestoreEntity):
 
             if pressure is None:
                 pressure = self._last_valid_inputs.get("pressure")
+                pressure_from_last_valid = pressure is not None
                 used_fallback = used_fallback or pressure is not None
                 invalid_inputs.append(config["sensor_pressure"])
                 invalid_details.append(
@@ -419,7 +444,14 @@ class ET0TodaySensor(SensorEntity, RestoreEntity):
             else:
                 self._last_valid_inputs["pressure"] = pressure
 
-            if any(v is None for v in [t, rh, wind, pressure]):
+            if pressure is None:
+                pressure = _pressure_from_altitude_kpa(altitude_m)
+                used_fallback = True
+                pressure_source = "altitude_estimate"
+            else:
+                pressure_source = "last_valid" if pressure_from_last_valid else "sensor"
+
+            if any(v is None for v in [t, rh, wind]):
                 self._attr_extra_state_attributes["last_update_error"] = (
                     "missing_inputs_no_fallback"
                 )
@@ -435,7 +467,12 @@ class ET0TodaySensor(SensorEntity, RestoreEntity):
 
             # Convert units
             u2 = wind / 3.6 if config.get("wind_speed_unit", "km/h") == "km/h" else wind
-            pressure_kpa = pressure / 10.0 if config.get("pressure_unit", "hPa") == "hPa" else pressure
+            if pressure_source == "altitude_estimate":
+                pressure_kpa = pressure
+            else:
+                pressure_kpa = (
+                    pressure / 10.0 if config.get("pressure_unit", "hPa") == "hPa" else pressure
+                )
 
             # Irradiation accumulated today (Wh/m²)
             rs = await _daily_irradiation_wh_m2(
@@ -458,6 +495,8 @@ class ET0TodaySensor(SensorEntity, RestoreEntity):
                 "humidity_pct": round(rh, 1),
                 "wind_speed_ms": round(u2, 2),
                 "pressure_kpa": round(pressure_kpa, 2),
+                "altitude_m": round(altitude_m, 1),
+                "pressure_source": pressure_source,
                 "irradiation_wh_m2": round(rs, 0),
                 "used_input_fallback": used_fallback,
                 "fallback_inputs": invalid_inputs,
@@ -465,6 +504,26 @@ class ET0TodaySensor(SensorEntity, RestoreEntity):
                 "last_successful_update": attempt_iso,
                 "last_update_error": None,
             }
+
+            # Notify all deficit sensors in parallel (flat fan-out):
+            #   ET₀TodaySensor -> WaterDeficitSensor
+            #                   -> ZoneWaterDeficitSensor (A, B, C...)
+            water_deficit_entity = self._config.get("water_deficit_1d_entity")
+            if water_deficit_entity is not None:
+                try:
+                    await water_deficit_entity.async_on_et0_updated()
+                except Exception:
+                    _LOGGER.exception(
+                        "ET₀ Today: error notifying WaterDeficitSensor"
+                    )
+            for zone_entity in self._config.get("zone_deficit_entities", []):
+                try:
+                    await zone_entity.async_on_et0_updated()
+                except Exception:
+                    _LOGGER.exception(
+                        "ET₀ Today: error notifying zone entity %s",
+                        getattr(zone_entity, "entity_id", repr(zone_entity)),
+                    )
         except Exception:
             self._attr_extra_state_attributes["last_update_error"] = "unexpected_exception"
             _LOGGER.exception(
@@ -481,8 +540,13 @@ class WaterDeficitSensor(SensorEntity):
     """
     Sensor: et0_irrigation_deficit_Nd
 
-    Water deficit over the last N complete days (mm).
-    deficit = Σ ET₀(d) − Σ rain(d)   for d in [today-N .. today-1]
+    Daily global deficit (mm):
+        deficit = ET₀_today − rain_today
+
+    The value is intraday and naturally resets at midnight because ET₀ Today
+    and rain_today restart for the new day.
+
+    Updated via push from ET0TodaySensor (not by polling).
 
     Positive value → soil moisture deficit → irrigate.
     Negative value → surplus → skip irrigation.
@@ -490,6 +554,7 @@ class WaterDeficitSensor(SensorEntity):
 
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_icon = "mdi:water-percent"
+    _attr_should_poll = False
 
     def __init__(
         self,
@@ -507,91 +572,138 @@ class WaterDeficitSensor(SensorEntity):
         self._attr_native_value: float | None = None
         self._attr_extra_state_attributes: dict[str, Any] = {}
 
-    async def async_update(self) -> None:
+        # Keep only previous-day context used by legacy attribute
+        # previous_day_rained and ET0 rolling history for surplus floor.
+        self._yesterday_et0: float = 0.0
+        self._yesterday_rain: float = 0.0
+        self._yesterday_rained: bool = False
+        self._last_closed_day_processed: date | None = None
+
+    async def async_added_to_hass(self) -> None:
+        """Populate previous-day cache on startup so first push has full attributes."""
+        await super().async_added_to_hass()
+        await self._async_rebuild_closed_days_cache()
+        try:
+            await self.async_on_et0_updated()
+        except Exception:
+            _LOGGER.exception(
+                "Water Deficit %dd: failed to publish initial state; using zero fallback",
+                self._days,
+            )
+            self._attr_native_value = 0.0
+            self._attr_extra_state_attributes = {
+                "total_et0_mm": 0.0,
+                "total_rain_mm": 0.0,
+                "intraday_et0_mm": 0.0,
+                "intraday_rain_mm": 0.0,
+                "intraday_deficit_mm": 0.0,
+                "days": self._days,
+                "daily_detail": [],
+                "previous_day_rained": self._yesterday_rained,
+                "yesterday_et0_mm": round(self._yesterday_et0, 2),
+                "yesterday_rain_mm": round(self._yesterday_rain, 2),
+            }
+            self.async_write_ha_state()
+
+    async def _async_rebuild_closed_days_cache(self) -> None:
+        """Refresh previous-day ET0/rain context and ET0 rolling history."""
         config = self._config
         now_local = dt_util.now()
+        yesterday = (now_local - timedelta(days=1)).date()
         lat = self.hass.config.latitude
-
+        altitude_m = _resolve_altitude_m(self.hass, config)
         wind_unit = config.get("wind_speed_unit", "km/h")
         pressure_unit = config.get("pressure_unit", "hPa")
 
-        total_et0 = 0.0
-        total_rain = 0.0
-        daily_detail: list[dict] = []
+        day_dt = datetime(
+            yesterday.year,
+            yesterday.month,
+            yesterday.day,
+            tzinfo=dt_util.get_time_zone(self.hass.config.time_zone),
+        )
+        doy = day_dt.timetuple().tm_yday
 
-        # yesterday_et0 is captured to push into et0_daily_history once per
-        # update cycle (offset=1 is always yesterday — the most recent closed
-        # day), fixing bug #2 where ET0TodaySensor was pushing intra-day
-        # accumulated values instead of closed-day totals.
-        yesterday_et0: float | None = None
+        t_stats = await _daily_stats(self.hass, config["sensor_temperature"], day_dt)
+        rh_stats = await _daily_stats(self.hass, config["sensor_humidity"], day_dt)
+        wind_stats = await _daily_stats(self.hass, config["sensor_wind_speed"], day_dt)
+        pressure_stats = await _daily_stats(self.hass, config["sensor_pressure"], day_dt)
+        rain_stats = await _daily_stats(self.hass, config["sensor_rain_today"], day_dt)
 
-        for offset in range(1, self._days + 1):
-            day = now_local - timedelta(days=offset)
-            doy = day.timetuple().tm_yday
+        t_mean = t_stats["mean"]
+        rh_mean = rh_stats["mean"]
+        wind_mean = wind_stats["mean"]
+        pressure_mean = pressure_stats["mean"]
 
-            # Temperature stats
-            t_stats = await _daily_stats(self.hass, config["sensor_temperature"], day)
-            rh_stats = await _daily_stats(self.hass, config["sensor_humidity"], day)
-            wind_stats = await _daily_stats(self.hass, config["sensor_wind_speed"], day)
-            pressure_stats = await _daily_stats(self.hass, config["sensor_pressure"], day)
-            rain_stats = await _daily_stats(self.hass, config["sensor_rain_today"], day)
+        yesterday_et0 = 0.0
+        yesterday_rain = float(rain_stats["max"] or 0.0)
 
-            t_mean = t_stats["mean"]
-            rh_mean = rh_stats["mean"]
-            wind_mean = wind_stats["mean"]
-            pressure_mean = pressure_stats["mean"]
-
-            if any(v is None for v in [t_mean, rh_mean, wind_mean, pressure_mean]):
-                _LOGGER.warning(
-                    "Water Deficit %dd: missing data for %s, skipping day",
-                    self._days,
-                    day.date(),
-                )
-                continue
-
+        if not any(v is None for v in [t_mean, rh_mean, wind_mean]):
             t_mean = _temperature_to_celsius(t_mean, config.get("temperature_unit", "°C"))
-
             u2 = wind_mean / 3.6 if wind_unit == "km/h" else wind_mean
-            pressure_kpa = pressure_mean / 10.0 if pressure_unit == "hPa" else pressure_mean
-
-            rs = await _daily_irradiation_wh_m2(
-                self.hass, config["sensor_luminosity"], day
+            pressure_kpa = (
+                _pressure_from_altitude_kpa(altitude_m)
+                if pressure_mean is None
+                else (pressure_mean / 10.0 if pressure_unit == "hPa" else pressure_mean)
+            )
+            rs = await _daily_irradiation_wh_m2(self.hass, config["sensor_luminosity"], day_dt)
+            yesterday_et0 = _penman_monteith(t_mean, rh_mean, u2, rs, pressure_kpa, lat, doy)
+        else:
+            _LOGGER.warning(
+                "Water Deficit %dd: missing data for %s, keeping yesterday ET0 as 0.0",
+                self._days,
+                yesterday,
             )
 
-            et0_day = _penman_monteith(t_mean, rh_mean, u2, rs, pressure_kpa, lat, doy)
-
-            # Rain: use max value of the day (rain sensors typically show
-            # cumulative daily total, so max = total for that day)
-            rain_day = rain_stats["max"] or 0.0
-
-            total_et0 += et0_day
-            total_rain += rain_day
-
-            if offset == 1:
-                yesterday_et0 = et0_day
-
-            daily_detail.append(
-                {
-                    "date": str(day.date()),
-                    "et0_mm": round(et0_day, 2),
-                    "rain_mm": round(rain_day, 2),
-                    "deficit_mm": round(et0_day - rain_day, 2),
-                }
-            )
-
-        # Push yesterday's closed-day ET0 into the rolling history used by
-        # ZoneWaterDeficitSensor to compute the dynamic surplus floor.
-        if yesterday_et0 is not None:
+        last_history_day = config.get("et0_history_last_day")
+        if last_history_day != yesterday.isoformat():
             config["et0_daily_history"].append(round(yesterday_et0, 2))
+            config["et0_history_last_day"] = yesterday.isoformat()
 
-        deficit = total_et0 - total_rain
+        self._yesterday_et0 = yesterday_et0
+        self._yesterday_rain = yesterday_rain
+        self._yesterday_rained = yesterday_rain >= yesterday_et0
+        self._last_closed_day_processed = yesterday
+
+    async def async_on_et0_updated(self) -> None:
+        """Called by ET0TodaySensor after each successful ET₀ calculation.
+
+        Checks whether the day has rolled over (midnight crossed since last
+        call) and rebuilds the closed-day cache if so.  Then combines the
+        cached closed-day totals with the live intraday readings to produce
+        the current deficit, writes HA state, and propagates to zone sensors.
+        """
+        now_local = dt_util.now()
+        yesterday = (now_local - timedelta(days=1)).date()
+
+        # Rebuild closed-day cache if we've crossed midnight since last rebuild.
+        if self._last_closed_day_processed != yesterday:
+            await self._async_rebuild_closed_days_cache()
+
+        # Daily reference deficit: ET₀_today - rain_today
+        et0_entity = self._config.get("et0_today_entity")
+        et0_today = float(getattr(et0_entity, "native_value", None) or 0.0)
+
+        rain_state = self.hass.states.get(self._config.get(CONF_SENSOR_RAIN_TODAY, ""))
+        rain_today = _safe_float(rain_state) or 0.0
+
+        deficit = et0_today - rain_today
+
         self._attr_native_value = round(deficit, 2)
         self._attr_extra_state_attributes = {
-            "total_et0_mm": round(total_et0, 2),
-            "total_rain_mm": round(total_rain, 2),
+            "total_et0_mm": round(et0_today, 2),
+            "total_rain_mm": round(rain_today, 2),
+            "intraday_et0_mm": round(et0_today, 2),
+            "intraday_rain_mm": round(rain_today, 2),
+            "intraday_deficit_mm": round(deficit, 2),
             "days": self._days,
-            "daily_detail": daily_detail,
+            "daily_detail": [],
+            # True when yesterday's rain covered or exceeded ET0.
+            # Used by the generated automation to skip irrigation entirely.
+            "previous_day_rained": self._yesterday_rained,
+            "yesterday_et0_mm": round(self._yesterday_et0, 2),
+            "yesterday_rain_mm": round(self._yesterday_rain, 2),
         }
+        self.async_write_ha_state()
 
 
 async def _daily_switch_on_minutes(
@@ -649,9 +761,10 @@ async def _daily_switch_on_minutes(
 
 
 class ZoneWaterDeficitSensor(SensorEntity, RestoreEntity):
-    """Event-driven zone water deficit.
+    """Zone water deficit with intra-day environmental updates.
 
     Update rules:
+    - Intra-day (polling): apply delta of (ET0_today * factor - rain_today)
     - At day rollover: add previous day's ambient deficit (zone ET0 - rain)
     - At irrigation end (switch off): subtract effective irrigation depth (mm)
     """
@@ -671,9 +784,8 @@ class ZoneWaterDeficitSensor(SensorEntity, RestoreEntity):
         self._config = config
         self._zone = zone
         self._switch = str(zone.get(CONF_ZONE_SWITCH))
-        self._days = max(1, min(5, int(zone.get(CONF_ZONE_MAX_DAYS_WITHOUT_IRRIGATION, 0) or 0)))
+        self._days = max(0, min(5, int(zone.get(CONF_ZONE_MAX_DAYS_WITHOUT_IRRIGATION, 0) or 0)))
         self._factor = float(zone.get(CONF_ZONE_FACTOR, 1.0))
-        self._is_et0_zone = zone.get(CONF_ZONE_TYPE) == "et0"
         self._zone_created_at = str(zone.get(CONF_ZONE_CREATED_AT, "") or "")
         # Dynamic floor will be computed at update time based on ambient ET0 average.
         self._min_surplus_floor = self._compute_surplus_floor()
@@ -695,8 +807,9 @@ class ZoneWaterDeficitSensor(SensorEntity, RestoreEntity):
         self._last_effective_watering_day: date | None = None
         self._switch_on_started_at: datetime | None = None
         self._last_environment_source: str | None = None
+        self._intraday_day: date | None = None
+        self._intraday_balance_mm: float | None = None
         self._unsub_switch_listener = None
-        self._unsub_midnight_listener = None
 
     async def async_added_to_hass(self) -> None:
         """Restore state and start listeners."""
@@ -745,6 +858,20 @@ class ZoneWaterDeficitSensor(SensorEntity, RestoreEntity):
                 except ValueError:
                     self._last_effective_watering_day = None
 
+            restored_intraday_day = last_state.attributes.get("intraday_day")
+            if isinstance(restored_intraday_day, str):
+                try:
+                    self._intraday_day = datetime.fromisoformat(restored_intraday_day).date()
+                except ValueError:
+                    self._intraday_day = None
+
+            restored_intraday_balance = last_state.attributes.get("intraday_balance_mm")
+            try:
+                if restored_intraday_balance is not None:
+                    self._intraday_balance_mm = float(restored_intraday_balance)
+            except (TypeError, ValueError):
+                self._intraday_balance_mm = None
+
         # If switch is currently ON, consider its current ON run as active.
         current_switch_state = self.hass.states.get(self._switch)
         if current_switch_state is not None and current_switch_state.state == "on":
@@ -755,15 +882,9 @@ class ZoneWaterDeficitSensor(SensorEntity, RestoreEntity):
             [self._switch],
             self._async_handle_switch_event,
         )
-        self._unsub_midnight_listener = async_track_time_change(
-            self.hass,
-            self._async_handle_day_rollover,
-            hour=0,
-            minute=5,
-            second=0,
-        )
 
         await self._async_process_pending_days()
+        await self._async_apply_intraday_environment_delta(initializing=True)
         self._update_attrs()
         self.async_write_ha_state()
 
@@ -771,15 +892,58 @@ class ZoneWaterDeficitSensor(SensorEntity, RestoreEntity):
         if self._unsub_switch_listener is not None:
             self._unsub_switch_listener()
             self._unsub_switch_listener = None
-        if self._unsub_midnight_listener is not None:
-            self._unsub_midnight_listener()
-            self._unsub_midnight_listener = None
         await super().async_will_remove_from_hass()
 
-    async def _async_handle_day_rollover(self, now: datetime) -> None:
-        await self._async_process_pending_days(reference=now)
-        self._update_attrs()
-        self.async_write_ha_state()
+    def _intraday_environment_balance(self) -> float | None:
+        """Return current intra-day environmental balance for this zone.
+
+        balance_mm = (ET0_today_mm * zone_factor) - rain_today_mm
+        """
+        et0_entity = self._config.get("et0_today_entity")
+        et0_today = getattr(et0_entity, "native_value", None)
+        try:
+            et0_today_mm = float(et0_today)
+        except (TypeError, ValueError):
+            return None
+
+        rain_state = self.hass.states.get(self._config.get(CONF_SENSOR_RAIN_TODAY, ""))
+        rain_today_mm = _safe_float(rain_state)
+        if rain_today_mm is None:
+            rain_today_mm = 0.0
+
+        return (et0_today_mm * self._factor) - rain_today_mm
+
+    async def _async_apply_intraday_environment_delta(self, initializing: bool = False) -> None:
+        """Apply intra-day delta to keep zone deficit updated at poll frequency."""
+        now_local = dt_util.now()
+        today = now_local.date()
+        current_balance = self._intraday_environment_balance()
+        if current_balance is None:
+            return
+
+        if self._intraday_day is None or self._intraday_balance_mm is None:
+            self._intraday_day = today
+            self._intraday_balance_mm = current_balance
+            if initializing:
+                self._last_environment_source = "intraday_baseline"
+            return
+
+        if self._intraday_day != today:
+            if self._last_processed_day is None or self._intraday_day > self._last_processed_day:
+                self._last_processed_day = self._intraday_day
+            self._intraday_day = today
+            self._intraday_balance_mm = current_balance
+            self._last_environment_source = "intraday_day_rollover"
+            return
+
+        delta_mm = current_balance - self._intraday_balance_mm
+        if abs(delta_mm) < 1e-6:
+            return
+
+        self._attr_native_value = round(self._attr_native_value + delta_mm, 2)
+        self._apply_surplus_floor()
+        self._intraday_balance_mm = current_balance
+        self._last_environment_source = "intraday_et0_today_rain_today"
 
     async def _async_process_pending_days(self, reference: datetime | None = None) -> None:
         """Apply ambient deficits for all missing closed days since last processing."""
@@ -827,40 +991,25 @@ class ZoneWaterDeficitSensor(SensorEntity, RestoreEntity):
 
         t_mean = _temperature_to_celsius(t_mean, config.get("temperature_unit", "°C"))
         u2 = wind_mean / 3.6 if wind_unit == "km/h" else wind_mean
-        pressure_kpa = pressure_mean / 10.0 if pressure_unit == "hPa" else pressure_mean
+        altitude_m = _resolve_altitude_m(self.hass, config)
+        pressure_kpa = (
+            _pressure_from_altitude_kpa(altitude_m)
+            if pressure_mean is None
+            else (pressure_mean / 10.0 if pressure_unit == "hPa" else pressure_mean)
+        )
 
         rs = await _daily_irradiation_wh_m2(self.hass, config["sensor_luminosity"], day)
         doy = day.timetuple().tm_yday
         et0_day = _penman_monteith(t_mean, rh_mean, u2, rs, pressure_kpa, self.hass.config.latitude, doy)
+        zone_et0_day = et0_day * self._factor
         rain_day = rain_stats["max"] or 0.0
-        return rain_day >= et0_day
+        return rain_day >= zone_et0_day
 
     async def _async_daily_environment_deficit(self, day: datetime) -> float:
         """Return zone ambient deficit for one closed day.
 
-        Primary source: native_value of the WaterDeficitSensor(1d) object
-        stored in config["water_deficit_1d_entity"] at setup time.  Using
-        the object reference avoids the hardcoded "sensor.water_deficit_1d"
-        entity_id string, which is fragile when the HA entity registry adds a
-        suffix due to name conflicts.
-        Fallback source: recompute from weather history for the given day.
+        Recompute from weather history for the specific closed day.
         """
-        # Prefer the integration's own daily deficit sensor so all zones use
-        # the same environmental baseline.
-        deficit_entity = self._config.get("water_deficit_1d_entity")
-        global_deficit = (
-            deficit_entity.native_value
-            if deficit_entity is not None
-            else None
-        )
-        if global_deficit is not None:
-            try:
-                global_deficit = float(global_deficit)
-                self._last_environment_source = "water_deficit_1d_entity"
-                return global_deficit * self._factor
-            except (TypeError, ValueError):
-                pass
-
         self._last_environment_source = "fallback_recalculation"
         config = self._config
         wind_unit = config.get("wind_speed_unit", "km/h")
@@ -882,7 +1031,12 @@ class ZoneWaterDeficitSensor(SensorEntity, RestoreEntity):
 
         t_mean = _temperature_to_celsius(t_mean, config.get("temperature_unit", "°C"))
         u2 = wind_mean / 3.6 if wind_unit == "km/h" else wind_mean
-        pressure_kpa = pressure_mean / 10.0 if pressure_unit == "hPa" else pressure_mean
+        altitude_m = _resolve_altitude_m(self.hass, config)
+        pressure_kpa = (
+            _pressure_from_altitude_kpa(altitude_m)
+            if pressure_mean is None
+            else (pressure_mean / 10.0 if pressure_unit == "hPa" else pressure_mean)
+        )
 
         rs = await _daily_irradiation_wh_m2(self.hass, config["sensor_luminosity"], day)
         doy = day.timetuple().tm_yday
@@ -916,8 +1070,20 @@ class ZoneWaterDeficitSensor(SensorEntity, RestoreEntity):
             ended_at = new_state.last_changed
             duration_min = max(0.0, (ended_at - started_at).total_seconds() / 60.0)
             irrig_mm = duration_min * self._application_rate
+            deficit_before = float(self._attr_native_value)
             self._attr_native_value = round(self._attr_native_value - irrig_mm, 2)
             self._apply_surplus_floor()
+            _LOGGER.debug(
+                "Zone deficit update on OFF | switch=%s factor=%.3f rate_mm_min=%.3f "
+                "duration_min=%.2f irrig_mm=%.2f deficit_before=%.2f deficit_after=%.2f",
+                self._switch,
+                self._factor,
+                self._application_rate,
+                duration_min,
+                irrig_mm,
+                deficit_before,
+                float(self._attr_native_value),
+            )
             if irrig_mm > 0:
                 self._last_effective_watering_day = ended_at.date()
             self._update_attrs(last_irrigation_mm=irrig_mm)
@@ -932,6 +1098,8 @@ class ZoneWaterDeficitSensor(SensorEntity, RestoreEntity):
         self._last_effective_watering_day = now_local.date()
         self._last_environment_source = "manual_reset"
         self._switch_on_started_at = None
+        self._intraday_day = now_local.date()
+        self._intraday_balance_mm = self._intraday_environment_balance()
         self._update_attrs(last_irrigation_mm=0.0)
         self.async_write_ha_state()
 
@@ -977,13 +1145,25 @@ class ZoneWaterDeficitSensor(SensorEntity, RestoreEntity):
             "et0_average_basis": "historical" if len(self._config.get("et0_daily_history", deque())) >= 7 else "building",
             "last_processed_day": self._last_processed_day.isoformat() if self._last_processed_day else None,
             "last_effective_watering_day": self._last_effective_watering_day.isoformat() if self._last_effective_watering_day else None,
+            "intraday_day": self._intraday_day.isoformat() if self._intraday_day else None,
+            "intraday_balance_mm": round(self._intraday_balance_mm, 3) if self._intraday_balance_mm is not None else None,
             "days_without_irrigation": self._days_without_irrigation(),
             "environment_source": self._last_environment_source,
             "switch_currently_on": self._switch_on_started_at is not None,
             "last_irrigation_mm": round(last_irrigation_mm, 2) if last_irrigation_mm is not None else None,
         }
 
-    async def async_update(self) -> None:
-        # Entity is event-driven; this keeps compatibility for manual updates.
+    async def async_on_et0_updated(self) -> None:
+        """Called by ET0TodaySensor after each successful ET₀ calculation.
+
+        Replaces polling: zones are updated synchronously after ET₀ so the
+        intraday delta is always computed against a freshly calculated value,
+        eliminating the race condition where ET₀ Today still held the previous
+        day's accumulated value at midnight rollover.
+        """
+        # Intra-day update first to roll over day baseline and avoid double-counting
+        # in pending closed-day processing.
+        await self._async_apply_intraday_environment_delta()
         await self._async_process_pending_days()
         self._update_attrs()
+        self.async_write_ha_state()
